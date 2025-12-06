@@ -3,7 +3,10 @@ import { useEffect, useState, useRef } from 'react';
 import { provider, formatGas, shortAddress } from '@/lib/utils';
 import Navbar from '@/components/Navbar';
 import Link from 'next/link';
-import { Box, Radio, Zap, Server, Globe, Cpu, Database, Loader2, ArrowRight } from 'lucide-react';
+import { Box, Radio, Zap, Server, Globe, Cpu, Database, Loader2 } from 'lucide-react';
+
+// Delay helper (RPC ko saans lene do)
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export default function Home() {
   const [stats, setStats] = useState({ gasPrice: '0', blockNumber: 0, chainId: 0 });
@@ -11,13 +14,14 @@ export default function Home() {
   const [txs, setTxs] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // History Pointers
+  // Pointers
   const processedHashes = useRef(new Set());
   const historyPointer = useRef(0); 
   const isFetchingMore = useRef(false);
 
   const fetchMainData = async () => {
     try {
+      // 1. Basic Stats
       const currentBlockNum = await provider.getBlockNumber();
       const feeData = await provider.getFeeData();
       const network = await provider.getNetwork();
@@ -28,57 +32,62 @@ export default function Home() {
         chainId: network.chainId.toString()
       });
 
-      // Initialize pointer on first load
       if (historyPointer.current === 0) {
           historyPointer.current = currentBlockNum - 6; 
       }
 
-      // 1. UPDATE LATEST BLOCKS (UI)
+      // 2. FETCH LATEST BLOCKS (Sequentially to avoid rate limit)
       const displayRange = 6;
-      const displayPromises = Array.from({length: displayRange}, (_, i) => provider.getBlock(currentBlockNum - i, false));
-      const fetchedBlocks = (await Promise.all(displayPromises)).filter(b => b);
+      let fetchedBlocks = [];
+
+      for(let i=0; i<displayRange; i++) {
+          try {
+              const b = await provider.getBlock(currentBlockNum - i, false);
+              if(b) fetchedBlocks.push(b);
+              await sleep(100); // 100ms Delay per block
+          } catch(e) { console.warn("Skip block", currentBlockNum - i); }
+      }
+      
       setBlocks(fetchedBlocks);
 
-      // 2. TRANSACTION COLLECTION
+      // 3. COLLECT TRANSACTIONS
       let incomingTxs = [];
 
-      // A. Check New Blocks first
+      // A. Check New Blocks
       for (const block of fetchedBlocks) {
           if (block.transactions && block.transactions.length > 0) {
-              const txsInBlock = await fetchTransactionsDetails(block.transactions);
+              // Fetch Tx Details with delay
+              const txsInBlock = await fetchTransactionsSafe(block.transactions);
               incomingTxs = [...incomingTxs, ...txsInBlock];
           }
       }
 
-      // B. If List is small, DIG HISTORY
-      // Hum tab tak piche jayenge jab tak list mein 20 items na ho jaye ya limit na aa jaye
+      // B. If List is small (< 20 items), Dig Deeper (Slowly)
       if (txs.length + incomingTxs.length < 20 && !isFetchingMore.current) {
           isFetchingMore.current = true;
-          console.log(`Deep Scanning History from Block #${historyPointer.current}...`);
+          console.log(`Digging history from #${historyPointer.current}...`);
           
-          const BATCH_SIZE = 10;
-          const MAX_ATTEMPTS = 5; // Don't loop forever
-          let attempts = 0;
           let foundHistoryTxs = [];
+          let attempts = 0;
           
-          while (foundHistoryTxs.length < 10 && attempts < MAX_ATTEMPTS) {
+          // Try fetching 2 batches of 5 blocks (Total 10 blocks)
+          while (foundHistoryTxs.length < 5 && attempts < 2) {
               const start = historyPointer.current;
-              const historyPromises = [];
               
-              for (let i = 0; i < BATCH_SIZE; i++) {
-                  if (start - i > 0) historyPromises.push(provider.getBlock(start - i, false));
-              }
-              
-              const oldBlocks = (await Promise.all(historyPromises)).filter(b => b);
-              
-              for (const b of oldBlocks) {
-                  if (b && b.transactions.length > 0) {
-                      const details = await fetchTransactionsDetails(b.transactions);
-                      foundHistoryTxs = [...foundHistoryTxs, ...details];
+              for (let i = 0; i < 5; i++) {
+                  if (start - i > 0) {
+                      try {
+                          const b = await provider.getBlock(start - i, false);
+                          if (b && b.transactions.length > 0) {
+                              const details = await fetchTransactionsSafe(b.transactions);
+                              foundHistoryTxs = [...foundHistoryTxs, ...details];
+                          }
+                          await sleep(200); // 200ms delay between history blocks
+                      } catch(e){}
                   }
               }
               
-              historyPointer.current -= BATCH_SIZE;
+              historyPointer.current -= 5;
               attempts++;
           }
           
@@ -86,80 +95,67 @@ export default function Home() {
           isFetchingMore.current = false;
       }
 
-      // 3. MERGE & UPDATE STATE
+      // 4. UPDATE UI
       if (incomingTxs.length > 0) {
           setTxs(prev => {
               const combined = [...incomingTxs, ...prev];
-              // Dedup
               const unique = combined.filter((t) => {
                   if (processedHashes.current.has(t.hash)) return false;
                   processedHashes.current.add(t.hash);
                   return true;
               });
-              
-              // Sort by Block (Newest First) & Limit Size
               return unique.sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0)).slice(0, 30);
           });
       }
 
-    } catch(e) { console.error("Sync Error", e); } 
+    } catch(e) { console.error("Sync Error", e.message); } 
     finally { setLoading(false); }
   };
 
-  // Helper to resolve Txs (Handles String Hashes)
-  const fetchTransactionsDetails = async (txList) => {
+  // Helper: Fetch Txs Safely (One by one)
+  const fetchTransactionsSafe = async (txList) => {
       const results = [];
-      const promises = txList.map(async (tx) => {
-          if (typeof tx === 'string') {
-              try { return await provider.getTransaction(tx); } catch(e){ return null; }
-          }
-          return tx;
-      });
+      // Only check first 10 txs of a block to save time
+      const subset = txList.slice(0, 10); 
       
-      const resolved = await Promise.all(promises);
-      return resolved.filter(t => t);
+      for (const tx of subset) {
+          if (typeof tx === 'string') {
+              try { 
+                  const t = await provider.getTransaction(tx);
+                  if(t) results.push(t);
+                  await sleep(50); // Tiny delay per tx fetch
+              } catch(e){ }
+          } else {
+              results.push(tx);
+          }
+      }
+      return results;
   };
 
   useEffect(() => {
     fetchMainData();
-    const interval = setInterval(fetchMainData, 5000);
+    // Refresh every 12 seconds (Very Safe Interval)
+    const interval = setInterval(fetchMainData, 12000);
     return () => clearInterval(interval);
   }, []);
 
   return (
     <div className="min-h-screen bg-[#050505] pb-10">
       <Navbar />
-      
-      {/* HEADER */}
-      <div className="border-b border-[#222] bg-[#0a0a0a] py-8 px-6">
-         <div className="max-w-[1600px] mx-auto">
-            <h1 className="text-3xl font-bold text-white tracking-tight mb-2 font-mono">
-                FlowStable <span className="text-neon neon-text">Explorer</span>
-            </h1>
-            <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
-                <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-neon rounded-full animate-pulse"></span>
-                    MAINNET LIVE
-                </span>
-                <span>DEEP SCAN ACTIVE</span>
-            </div>
-         </div>
-      </div>
-
-      <main className="max-w-[1600px] mx-auto px-6 mt-8">
+      <main className="max-w-[1600px] mx-auto px-4 md:px-6 mt-8">
         
         {/* STATS */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <StatCard icon={<Server size={20}/>} label="HEIGHT" value={`#${stats.blockNumber}`} />
             <StatCard icon={<Zap size={20}/>} label="GAS" value={`${formatGas(stats.gasPrice)} Gwei`} />
             <StatCard icon={<Globe size={20}/>} label="CHAIN ID" value={stats.chainId} />
-            <StatCard icon={<Cpu size={20}/>} label="STATUS" value="OPERATIONAL" color="text-neon" />
+            <StatCard icon={<Cpu size={20}/>} label="STATUS" value={txs.length > 0 ? "LIVE" : "SYNCING"} color="text-neon" />
         </div>
 
         {/* FEED */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            {/* BLOCKS */}
+            {/* LATEST BLOCKS */}
             <div className="terminal-card">
                 <div className="bg-[#111] p-3 border-b border-[#222] flex justify-between">
                     <h3 className="text-neon font-bold text-xs font-mono flex items-center gap-2">
@@ -167,16 +163,12 @@ export default function Home() {
                     </h3>
                 </div>
                 <div className="divide-y divide-[#1a1a1a]">
-                    {loading ? <Loading/> : blocks.map(b => (
+                    {loading && blocks.length === 0 ? <Loading/> : blocks.map(b => (
                         <div key={b.number} className="p-4 flex justify-between items-center hover:bg-[#0f0f0f] transition group">
                             <div className="flex items-center gap-4">
-                                <div className="text-gray-500 font-mono text-[10px] group-hover:text-neon transition">
-                                    [BK]
-                                </div>
+                                <div className="text-gray-500 font-mono text-[10px] group-hover:text-neon transition">[BK]</div>
                                 <div>
-                                    <Link href={`/block/${b.number}`} className="text-white font-mono text-sm hover:text-neon hover:underline decoration-dashed">
-                                        BLOCK #{b.number}
-                                    </Link>
+                                    <Link href={`/block/${b.number}`} className="text-white font-mono text-sm hover:text-neon hover:underline decoration-dashed">BLOCK #{b.number}</Link>
                                     <p className="text-[10px] text-gray-500 font-mono">{(Date.now()/1000 - b.timestamp).toFixed(0)}s ago</p>
                                 </div>
                             </div>
@@ -188,27 +180,19 @@ export default function Home() {
                         </div>
                     ))}
                 </div>
-                <div className="p-2 text-center border-t border-[#222]">
-                    <button className="text-[10px] text-gray-500 hover:text-neon font-mono uppercase">View All Blocks {'>'}</button>
-                </div>
             </div>
 
             {/* TRANSACTIONS */}
             <div className="terminal-card">
                 <div className="bg-[#111] p-3 border-b border-[#222] flex justify-between items-center">
                     <h3 className="text-neon font-bold text-xs font-mono flex items-center gap-2">
-                        <Radio size={14}/> LIVE TRANSACTIONS
+                        <Radio size={14}/> RECENT TRANSACTIONS
                     </h3>
-                    <div className="flex items-center gap-2">
-                         {isFetchingMore.current && (
-                             <span className="flex items-center gap-1 text-[9px] text-yellow-500 font-mono animate-pulse">
-                                 <Loader2 size={10} className="animate-spin"/> DIGGING HISTORY...
-                             </span>
-                         )}
-                         <span className="text-[10px] text-gray-600 font-mono">
-                            {txs.length} SHOWN
+                    {isFetchingMore.current && (
+                        <span className="flex items-center gap-1 text-[9px] text-yellow-500 font-mono animate-pulse">
+                            <Loader2 size={10} className="animate-spin"/> DIGGING...
                         </span>
-                    </div>
+                    )}
                 </div>
                 <div className="divide-y divide-[#1a1a1a]">
                     {loading && txs.length === 0 ? <Loading/> : txs.map(tx => (
@@ -220,15 +204,8 @@ export default function Home() {
                                 </Link>
                             </div>
                             <div className="flex justify-between pl-4 mt-1">
-                                <div className="flex items-center gap-1">
-                                    <span className="text-[10px] text-gray-500 font-mono">F:</span>
-                                    <Link href={`/address/${tx.from}`} className="text-gray-300 hover:text-white text-[10px] font-mono">{shortAddress(tx.from)}</Link>
-                                </div>
-                                <ArrowRight size={10} className="text-gray-600"/>
-                                <div className="flex items-center gap-1">
-                                    <span className="text-[10px] text-gray-500 font-mono">T:</span>
-                                    <Link href={`/address/${tx.to}`} className="text-gray-300 hover:text-white text-[10px] font-mono">{shortAddress(tx.to)}</Link>
-                                </div>
+                                <span className="text-[10px] text-gray-500 font-mono">F: {shortAddress(tx.from)}</span>
+                                <span className="text-[10px] text-gray-500 font-mono">T: {shortAddress(tx.to)}</span>
                             </div>
                         </div>
                     ))}
@@ -257,4 +234,4 @@ const StatCard = ({icon, label, value, color}) => (
     </div>
 );
 
-const Loading = () => <div className="p-6 text-center text-neon font-mono text-xs animate-pulse">_SYNCING...</div>;
+const Loading = () => <div className="p-6 text-center text-neon font-mono text-xs animate-pulse">_SYNCING_DATA...</div>;
