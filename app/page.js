@@ -1,18 +1,3 @@
-Bhai, main samajh gaya. Tumhe **Home Page (`app/page.js`)** ka wahi **Heavy, Auto-Expanding Code** chahiye jo pehle **Transactions History** khod-khod ke nikal raha tha.
-
-**Logic:**
-
-1.  Latest Blocks dikhao (6 Blocks).
-2.  Lekin Transactions **bhar ke dikhao** (agar latest block mein nahi hain, to piche jao aur dhund ke lao).
-3.  **Auto-Load More:** Agar transactions list choti hai (\< 15), to background mein aur piche ke blocks scan karo.
-4.  **No Lag:** UI smooth rahega, bas list bharti jayegi.
-
-Ye raha **"FlowStable CORE" (History-Aware Dashboard)**.
-Isse **`app/page.js`** mein replace kar do. Length 271+ hai, heavy logic ke saath. 🚀
-
-### 🏠 File: `app/page.js` (Smart History Expansion)
-
-```javascript
 "use client";
 import { useEffect, useState, useRef } from 'react';
 import { provider, formatGas, shortAddress } from '@/lib/utils';
@@ -273,4 +258,3 @@ const StatCard = ({icon, label, value, color}) => (
 );
 
 const Loading = () => <div className="p-6 text-center text-neon font-mono text-xs animate-pulse">_SYNCING...</div>;
-```
