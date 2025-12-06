@@ -1,9 +1,24 @@
+Bhai, main samajh gaya. Tumhe **Home Page (`app/page.js`)** ka wahi **Heavy, Auto-Expanding Code** chahiye jo pehle **Transactions History** khod-khod ke nikal raha tha.
+
+**Logic:**
+
+1.  Latest Blocks dikhao (6 Blocks).
+2.  Lekin Transactions **bhar ke dikhao** (agar latest block mein nahi hain, to piche jao aur dhund ke lao).
+3.  **Auto-Load More:** Agar transactions list choti hai (\< 15), to background mein aur piche ke blocks scan karo.
+4.  **No Lag:** UI smooth rahega, bas list bharti jayegi.
+
+Ye raha **"FlowStable CORE" (History-Aware Dashboard)**.
+Isse **`app/page.js`** mein replace kar do. Length 271+ hai, heavy logic ke saath. 🚀
+
+### 🏠 File: `app/page.js` (Smart History Expansion)
+
+```javascript
 "use client";
 import { useEffect, useState, useRef } from 'react';
 import { provider, formatGas, shortAddress } from '@/lib/utils';
 import Navbar from '@/components/Navbar';
 import Link from 'next/link';
-import { Box, Radio, Zap, Server, Globe, Cpu, Database, Loader2 } from 'lucide-react';
+import { Box, Radio, Zap, Server, Globe, Cpu, Database, Loader2, ArrowRight } from 'lucide-react';
 
 export default function Home() {
   const [stats, setStats] = useState({ gasPrice: '0', blockNumber: 0, chainId: 0 });
@@ -11,11 +26,12 @@ export default function Home() {
   const [txs, setTxs] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // Ye pointers yaad rakhenge ki humne kahan tak scan kar liya hai
+  // History Pointers
   const processedHashes = useRef(new Set());
-  const historyPointer = useRef(0); // Ye track karega hum history me kitna piche gaye
+  const historyPointer = useRef(0); 
+  const isFetchingMore = useRef(false);
 
-  const fetchData = async () => {
+  const fetchMainData = async () => {
     try {
       const currentBlockNum = await provider.getBlockNumber();
       const feeData = await provider.getFeeData();
@@ -27,115 +43,101 @@ export default function Home() {
         chainId: network.chainId.toString()
       });
 
-      // Agar ye pehli baar chal raha hai, to pointer set karo
+      // Initialize pointer on first load
       if (historyPointer.current === 0) {
           historyPointer.current = currentBlockNum - 6; 
       }
 
-      // -------------------------------
-      // 1. UPDATE LATEST BLOCKS (UI Feed)
-      // -------------------------------
+      // 1. UPDATE LATEST BLOCKS (UI)
       const displayRange = 6;
       const displayPromises = Array.from({length: displayRange}, (_, i) => provider.getBlock(currentBlockNum - i, false));
       const fetchedBlocks = (await Promise.all(displayPromises)).filter(b => b);
       setBlocks(fetchedBlocks);
 
-      // -------------------------------
-      // 2. FILL THE TRANSACTION LIST
-      // -------------------------------
-      
-      let incomingHashes = [];
+      // 2. TRANSACTION COLLECTION
+      let incomingTxs = [];
 
-      // STEP A: Pehle Latest blocks check karo (New Data)
+      // A. Check New Blocks first
       for (const block of fetchedBlocks) {
-          if (block.transactions?.length > 0) {
-              const hashes = block.transactions.map(t => (typeof t === 'string' ? t : t.hash));
-              incomingHashes = [...incomingHashes, ...hashes];
+          if (block.transactions && block.transactions.length > 0) {
+              const txsInBlock = await fetchTransactionsDetails(block.transactions);
+              incomingTxs = [...incomingTxs, ...txsInBlock];
           }
       }
 
-      // STEP B: Ab check karo ki kya humare paas enough Transactions hain?
-      // Agar list choti hai (< 15 items), toh HISTORY se aur data nikalo
-      
-      // Hum current state check nahi kar sakte easily inside async without ref, 
-      // so we assume we need more if incoming is low.
-      
-      let needMoreData = true; // Flag to decide if we dig history
-      
-      // Agar latest blocks mein hi bhar ke tx mil gaye, to history mat khodo
-      if (incomingHashes.length > 5) {
-          needMoreData = false; 
-          // Reset pointer slightly to stay near head
-          historyPointer.current = currentBlockNum - 10;
-      }
-
-      if (needMoreData) {
-          console.log(`Need more data. Digging history from block ${historyPointer.current}...`);
+      // B. If List is small, DIG HISTORY
+      // Hum tab tak piche jayenge jab tak list mein 20 items na ho jaye ya limit na aa jaye
+      if (txs.length + incomingTxs.length < 20 && !isFetchingMore.current) {
+          isFetchingMore.current = true;
+          console.log(`Deep Scanning History from Block #${historyPointer.current}...`);
           
-          // Hum 10 blocks ka chunk uthayenge history se
-          const chunkStats = 10;
-          const historyPromises = [];
+          const BATCH_SIZE = 10;
+          const MAX_ATTEMPTS = 5; // Don't loop forever
+          let attempts = 0;
+          let foundHistoryTxs = [];
           
-          for (let i = 0; i < chunkStats; i++) {
-              // Ensure hum 0 se neeche na jaye
-              const targetBlock = historyPointer.current - i;
-              if (targetBlock > 0) {
-                  historyPromises.push(provider.getBlock(targetBlock, false));
-              }
-          }
-
-          // Blocks fetch karo
-          const historyBlocks = (await Promise.all(historyPromises)).filter(b => b);
-          
-          // Pointer ko update karo taaki agli baar iske aur piche se shuru kare
-          historyPointer.current = historyPointer.current - chunkStats;
-
-          // History blocks se hashes nikalo
-          for (const block of historyBlocks) {
-              if (block.transactions?.length > 0) {
-                  const hashes = block.transactions.map(t => (typeof t === 'string' ? t : t.hash));
-                  incomingHashes = [...incomingHashes, ...hashes];
-              }
-          }
-      }
-
-      // -------------------------------
-      // 3. FETCH DETAILS & UPDATE STATE
-      // -------------------------------
-      
-      // Duplicates hatao before fetching
-      const uniqueHashesToFetch = [...new Set(incomingHashes)].filter(h => !processedHashes.current.has(h));
-      
-      if (uniqueHashesToFetch.length > 0) {
-          console.log(`Fetching details for ${uniqueHashesToFetch.length} new transactions...`);
-          
-          const txDetailsPromises = uniqueHashesToFetch.map(hash => provider.getTransaction(hash));
-          const resolvedTxs = await Promise.all(txDetailsPromises);
-          const validTxs = resolvedTxs.filter(t => t !== null);
-
-          // State update
-          setTxs(prev => {
-              // Add new valid txs
-              const combined = [...validTxs, ...prev];
+          while (foundHistoryTxs.length < 10 && attempts < MAX_ATTEMPTS) {
+              const start = historyPointer.current;
+              const historyPromises = [];
               
-              // Add to processed set
-              validTxs.forEach(t => processedHashes.current.add(t.hash));
+              for (let i = 0; i < BATCH_SIZE; i++) {
+                  if (start - i > 0) historyPromises.push(provider.getBlock(start - i, false));
+              }
+              
+              const oldBlocks = (await Promise.all(historyPromises)).filter(b => b);
+              
+              for (const b of oldBlocks) {
+                  if (b && b.transactions.length > 0) {
+                      const details = await fetchTransactionsDetails(b.transactions);
+                      foundHistoryTxs = [...foundHistoryTxs, ...details];
+                  }
+              }
+              
+              historyPointer.current -= BATCH_SIZE;
+              attempts++;
+          }
+          
+          incomingTxs = [...incomingTxs, ...foundHistoryTxs];
+          isFetchingMore.current = false;
+      }
 
-              // Sort by Block Number (Newest Top) & Keep max 30
-              return combined.sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0)).slice(0, 30);
+      // 3. MERGE & UPDATE STATE
+      if (incomingTxs.length > 0) {
+          setTxs(prev => {
+              const combined = [...incomingTxs, ...prev];
+              // Dedup
+              const unique = combined.filter((t) => {
+                  if (processedHashes.current.has(t.hash)) return false;
+                  processedHashes.current.add(t.hash);
+                  return true;
+              });
+              
+              // Sort by Block (Newest First) & Limit Size
+              return unique.sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0)).slice(0, 30);
           });
-      } else {
-          console.log("No new unique transactions found in this pass.");
       }
 
     } catch(e) { console.error("Sync Error", e); } 
     finally { setLoading(false); }
   };
 
+  // Helper to resolve Txs (Handles String Hashes)
+  const fetchTransactionsDetails = async (txList) => {
+      const results = [];
+      const promises = txList.map(async (tx) => {
+          if (typeof tx === 'string') {
+              try { return await provider.getTransaction(tx); } catch(e){ return null; }
+          }
+          return tx;
+      });
+      
+      const resolved = await Promise.all(promises);
+      return resolved.filter(t => t);
+  };
+
   useEffect(() => {
-    fetchData();
-    // Fast refresh (5s) taaki jaldi bhar jaye list
-    const interval = setInterval(fetchData, 5000);
+    fetchMainData();
+    const interval = setInterval(fetchMainData, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -143,20 +145,36 @@ export default function Home() {
     <div className="min-h-screen bg-[#050505] pb-10">
       <Navbar />
       
-      <main className="max-w-[1600px] mx-auto px-4 md:px-6 mt-8">
+      {/* HEADER */}
+      <div className="border-b border-[#222] bg-[#0a0a0a] py-8 px-6">
+         <div className="max-w-[1600px] mx-auto">
+            <h1 className="text-3xl font-bold text-white tracking-tight mb-2 font-mono">
+                FlowStable <span className="text-neon neon-text">Explorer</span>
+            </h1>
+            <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
+                <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 bg-neon rounded-full animate-pulse"></span>
+                    MAINNET LIVE
+                </span>
+                <span>DEEP SCAN ACTIVE</span>
+            </div>
+         </div>
+      </div>
+
+      <main className="max-w-[1600px] mx-auto px-6 mt-8">
         
         {/* STATS */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <StatCard icon={<Server size={20}/>} label="HEIGHT" value={`#${stats.blockNumber}`} />
             <StatCard icon={<Zap size={20}/>} label="GAS" value={`${formatGas(stats.gasPrice)} Gwei`} />
             <StatCard icon={<Globe size={20}/>} label="CHAIN ID" value={stats.chainId} />
-            <StatCard icon={<Cpu size={20}/>} label="TPS" value={txs.length > 0 ? "LIVE" : "WAITING"} color={txs.length > 0 ? "text-neon" : "text-yellow-500"} />
+            <StatCard icon={<Cpu size={20}/>} label="STATUS" value="OPERATIONAL" color="text-neon" />
         </div>
 
         {/* FEED */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            {/* LATEST BLOCKS */}
+            {/* BLOCKS */}
             <div className="terminal-card">
                 <div className="bg-[#111] p-3 border-b border-[#222] flex justify-between">
                     <h3 className="text-neon font-bold text-xs font-mono flex items-center gap-2">
@@ -164,7 +182,7 @@ export default function Home() {
                     </h3>
                 </div>
                 <div className="divide-y divide-[#1a1a1a]">
-                    {loading && blocks.length === 0 ? <Loading/> : blocks.map(b => (
+                    {loading ? <Loading/> : blocks.map(b => (
                         <div key={b.number} className="p-4 flex justify-between items-center hover:bg-[#0f0f0f] transition group">
                             <div className="flex items-center gap-4">
                                 <div className="text-gray-500 font-mono text-[10px] group-hover:text-neon transition">
@@ -196,11 +214,10 @@ export default function Home() {
                     <h3 className="text-neon font-bold text-xs font-mono flex items-center gap-2">
                         <Radio size={14}/> LIVE TRANSACTIONS
                     </h3>
-                    {/* Status Indicator */}
                     <div className="flex items-center gap-2">
-                         {txs.length < 15 && (
+                         {isFetchingMore.current && (
                              <span className="flex items-center gap-1 text-[9px] text-yellow-500 font-mono animate-pulse">
-                                 <Loader2 size={10} className="animate-spin"/> FILLING DATA...
+                                 <Loader2 size={10} className="animate-spin"/> DIGGING HISTORY...
                              </span>
                          )}
                          <span className="text-[10px] text-gray-600 font-mono">
@@ -218,8 +235,15 @@ export default function Home() {
                                 </Link>
                             </div>
                             <div className="flex justify-between pl-4 mt-1">
-                                <span className="text-[10px] text-gray-500 font-mono">F: {shortAddress(tx.from)}</span>
-                                <span className="text-[10px] text-gray-500 font-mono">T: {shortAddress(tx.to)}</span>
+                                <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-500 font-mono">F:</span>
+                                    <Link href={`/address/${tx.from}`} className="text-gray-300 hover:text-white text-[10px] font-mono">{shortAddress(tx.from)}</Link>
+                                </div>
+                                <ArrowRight size={10} className="text-gray-600"/>
+                                <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-500 font-mono">T:</span>
+                                    <Link href={`/address/${tx.to}`} className="text-gray-300 hover:text-white text-[10px] font-mono">{shortAddress(tx.to)}</Link>
+                                </div>
                             </div>
                         </div>
                     ))}
@@ -249,3 +273,4 @@ const StatCard = ({icon, label, value, color}) => (
 );
 
 const Loading = () => <div className="p-6 text-center text-neon font-mono text-xs animate-pulse">_SYNCING...</div>;
+```
