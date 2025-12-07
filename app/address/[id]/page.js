@@ -40,6 +40,9 @@ export default function AddressPage() {
   const [activeTab, setActiveTab] = useState("token_transfers");
   const [showHoldings, setShowHoldings] = useState(false);
 
+  // pagination for token transfers
+  const [pageSize, setPageSize] = useState(25); // first 25, then +50 on click
+
   useEffect(() => {
     if (!id) return;
 
@@ -113,7 +116,7 @@ export default function AddressPage() {
           "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
         const paddedId = ethers.zeroPadValue(address, 32).toLowerCase();
 
-        const LOG_DEPTH = 5000;
+        const LOG_DEPTH = 5000; // last 5000 blocks (you can increase if needed)
         const fromBlock = Math.max(0, latestBlock - LOG_DEPTH);
 
         const logs = await provider.getLogs({
@@ -134,9 +137,10 @@ export default function AddressPage() {
               t2 === paddedId
             );
           })
-          .reverse();
+          .reverse(); // newest last -> reverse for newest first
 
-        setTokenTxs(relevantLogs.slice(0, 200));
+        setTokenTxs(relevantLogs);
+        setPageSize(25); // reset pagination on each new address
 
         // 4) HOLDINGS + TOKEN META
         setScanStatus("DISCOVERING_TOKEN_HOLDINGS...");
@@ -193,7 +197,7 @@ export default function AddressPage() {
               });
             }
           } catch {
-            // ignore bad tokens
+            // ignore non-standard tokens
           }
         }
 
@@ -496,7 +500,7 @@ export default function AddressPage() {
                     </tr>
                   )}
 
-                  {tokenTxs.map((log, i) => {
+                  {tokenTxs.slice(0, pageSize).map((log, i) => {
                     const addrLower = String(id).toLowerCase();
                     const fromTopic = log.topics[1];
                     const toTopic = log.topics[2];
@@ -608,6 +612,18 @@ export default function AddressPage() {
                 </tbody>
               </table>
             </div>
+
+            {/* VIEW MORE BUTTON */}
+            {tokenTxs.length > pageSize && (
+              <div className="flex justify-center py-6">
+                <button
+                  onClick={() => setPageSize((p) => p + 50)}
+                  className="px-6 py-2 text-xs font-mono font-bold uppercase border border-neon text-neon bg-neon/10 hover:bg-neon/20 transition"
+                >
+                  View More (+50)
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </main>
@@ -635,4 +651,4 @@ function formatWithDecimals(hex, decimals) {
   } catch {
     return "0";
   }
-                                         }
+}
