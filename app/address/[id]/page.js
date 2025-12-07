@@ -29,19 +29,13 @@ export default function AddressPage() {
     meta: null, // { name, symbol, supply, decimals } if ERC20
   });
 
-  const [holdings, setHoldings] = useState([]); // {name,symbol,balance,contract,isNative}
-  const [netWorth, setNetWorth] = useState("0.00"); // reserved
-
-  const [tokenTxs, setTokenTxs] = useState([]); // ethers.Log[]
-  const [tokenMeta, setTokenMeta] = useState({}); // addrLower -> {symbol,name,decimals}
+  const [holdings, setHoldings] = useState([]);      // portfolio list
+  const [tokenTxs, setTokenTxs] = useState([]);      // all token logs
+  const [tokenMeta, setTokenMeta] = useState({});    // addr -> {symbol,name,decimals}
 
   const [loading, setLoading] = useState(true);
   const [scanStatus, setScanStatus] = useState("INITIALIZING...");
-  const [activeTab, setActiveTab] = useState("token_transfers");
   const [showHoldings, setShowHoldings] = useState(false);
-
-  // pagination for token transfers
-  const [pageSize, setPageSize] = useState(25); // first 25, then +50 on click
 
   useEffect(() => {
     if (!id) return;
@@ -54,11 +48,10 @@ export default function AddressPage() {
         const address = String(id).toLowerCase();
 
         // 1) BASIC STATE
-        const [balanceBN, code, count, latestBlock] = await Promise.all([
+        const [balanceBN, code, count] = await Promise.all([
           provider.getBalance(address),
           provider.getCode(address),
           provider.getTransactionCount(address),
-          provider.getBlockNumber(),
         ]);
 
         const isContract = code !== "0x";
@@ -110,22 +103,19 @@ export default function AddressPage() {
           meta: contractMeta,
         });
 
-        // 3) TOKEN TRANSFERS VIA LOGS
+        // 3) TOKEN TRANSFERS VIA LOGS (NO LIMIT: fromBlock = 0)
         setScanStatus("FETCHING_TOKEN_TRANSFERS...");
         const transferTopic =
           "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
         const paddedId = ethers.zeroPadValue(address, 32).toLowerCase();
 
-        const LOG_DEPTH = 5000; // last 5000 blocks (you can increase if needed)
-        const fromBlock = Math.max(0, latestBlock - LOG_DEPTH);
-
         const logs = await provider.getLogs({
-          fromBlock,
+          fromBlock: 0,
           toBlock: "latest",
           topics: [transferTopic],
         });
 
-        // relevant if this addr is contract OR from OR to
+        // relevant if this addr is token contract OR from OR to
         const relevantLogs = logs
           .filter((l) => {
             const addrLower = l.address.toLowerCase();
@@ -137,10 +127,9 @@ export default function AddressPage() {
               t2 === paddedId
             );
           })
-          .reverse(); // newest last -> reverse for newest first
+          .reverse(); // latest at bottom → reverse for newest first
 
         setTokenTxs(relevantLogs);
-        setPageSize(25); // reset pagination on each new address
 
         // 4) HOLDINGS + TOKEN META
         setScanStatus("DISCOVERING_TOKEN_HOLDINGS...");
@@ -197,11 +186,11 @@ export default function AddressPage() {
               });
             }
           } catch {
-            // ignore non-standard tokens
+            // ignore weird tokens
           }
         }
 
-        // if address itself was ERC20 token
+        // if address itself is ERC20 token
         if (contractMeta) {
           metaMap[address] = {
             symbol: contractMeta.symbol,
@@ -440,12 +429,7 @@ export default function AddressPage() {
         <div className="terminal-card min-h-[400px]">
           <div className="flex bg-[#111] border-b border-[#222] overflow-x-auto">
             <button
-              onClick={() => setActiveTab("token_transfers")}
-              className={`px-8 py-4 text-xs font-mono font-bold uppercase whitespace-nowrap transition-all border-b-2 ${
-                activeTab === "token_transfers"
-                  ? "text-neon border-neon bg-neon/5"
-                  : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-[#1a1a1a]"
-              }`}
+              className="px-8 py-4 text-xs font-mono font-bold uppercase whitespace-nowrap border-b-2 text-neon border-neon bg-neon/5"
             >
               Token Transfers ({tokenTxs.length})
             </button>
@@ -495,12 +479,12 @@ export default function AddressPage() {
                         colSpan={9}
                         className="text-center text-xs text-gray-500 py-10"
                       >
-                        No token transfers found in the scanned range.
+                        No token transfers found.
                       </td>
                     </tr>
                   )}
 
-                  {tokenTxs.slice(0, pageSize).map((log, i) => {
+                  {tokenTxs.map((log, i) => {
                     const addrLower = String(id).toLowerCase();
                     const fromTopic = log.topics[1];
                     const toTopic = log.topics[2];
@@ -612,18 +596,6 @@ export default function AddressPage() {
                 </tbody>
               </table>
             </div>
-
-            {/* VIEW MORE BUTTON */}
-            {tokenTxs.length > pageSize && (
-              <div className="flex justify-center py-6">
-                <button
-                  onClick={() => setPageSize((p) => p + 50)}
-                  className="px-6 py-2 text-xs font-mono font-bold uppercase border border-neon text-neon bg-neon/10 hover:bg-neon/20 transition"
-                >
-                  View More (+50)
-                </button>
-              </div>
-            )}
           </div>
         </div>
       </main>
@@ -631,7 +603,7 @@ export default function AddressPage() {
   );
 }
 
-/* local helpers (no types) */
+/* local helpers */
 function hexToDecString(hex) {
   if (!hex) return "0";
   try {
@@ -651,4 +623,4 @@ function formatWithDecimals(hex, decimals) {
   } catch {
     return "0";
   }
-}
+                            }
