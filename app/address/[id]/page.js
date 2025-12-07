@@ -15,56 +15,29 @@ import {
   Copy,
 } from "lucide-react";
 
-type SummaryState = {
-  balance: string;
-  nonce: number;
-  isContract: boolean;
-  code: string;
-  type: string;
-  meta?: {
-    name: string;
-    symbol: string;
-    supply: string;
-    decimals: number;
-  } | null;
-};
-
-type Holding = {
-  name: string;
-  symbol: string;
-  balance: string;
-  contract: string | null;
-  isNative: boolean;
-};
-
-type TokenMeta = {
-  symbol: string;
-  name: string;
-  decimals: number;
-};
-
 export default function AddressPage() {
-  const { id } = useParams() as { id: string };
+  const params = useParams();
+  const id = params?.id;
 
   // --- STATE ---
-  const [summary, setSummary] = useState<SummaryState>({
+  const [summary, setSummary] = useState({
     balance: "0",
     nonce: 0,
     isContract: false,
     code: "0x",
     type: "LOADING...",
-    meta: null,
+    meta: null, // { name, symbol, supply, decimals } if ERC20
   });
 
-  const [holdings, setHoldings] = useState<Holding[]>([]);
-  const [netWorth, setNetWorth] = useState("0.00"); // future use
+  const [holdings, setHoldings] = useState([]); // {name,symbol,balance,contract,isNative}
+  const [netWorth, setNetWorth] = useState("0.00"); // reserved
 
-  const [tokenTxs, setTokenTxs] = useState<ethers.Log[]>([]);
-  const [tokenMeta, setTokenMeta] = useState<Record<string, TokenMeta>>({});
+  const [tokenTxs, setTokenTxs] = useState([]); // ethers.Log[]
+  const [tokenMeta, setTokenMeta] = useState({}); // addrLower -> {symbol,name,decimals}
 
   const [loading, setLoading] = useState(true);
   const [scanStatus, setScanStatus] = useState("INITIALIZING...");
-  const [activeTab, setActiveTab] = useState<"token_transfers">("token_transfers");
+  const [activeTab, setActiveTab] = useState("token_transfers");
   const [showHoldings, setShowHoldings] = useState(false);
 
   useEffect(() => {
@@ -75,7 +48,7 @@ export default function AddressPage() {
         setLoading(true);
         setScanStatus("FETCHING_ONCHAIN_STATE...");
 
-        const address = id.toLowerCase();
+        const address = String(id).toLowerCase();
 
         // 1) BASIC STATE
         const [balanceBN, code, count, latestBlock] = await Promise.all([
@@ -86,7 +59,7 @@ export default function AddressPage() {
         ]);
 
         const isContract = code !== "0x";
-        let contractMeta: SummaryState["meta"] = null;
+        let contractMeta = null;
 
         // 2) IF CONTRACT, TRY ERC20 METADATA
         if (isContract) {
@@ -117,7 +90,7 @@ export default function AddressPage() {
               decimals: Number(d),
             };
           } catch {
-            contractMeta = null; // not a clean ERC20
+            contractMeta = null; // not ERC20
           }
         }
 
@@ -140,7 +113,6 @@ export default function AddressPage() {
           "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
         const paddedId = ethers.zeroPadValue(address, 32).toLowerCase();
 
-        // getLogs for a window (you can widen/narrow LOG_DEPTH)
         const LOG_DEPTH = 5000;
         const fromBlock = Math.max(0, latestBlock - LOG_DEPTH);
 
@@ -150,9 +122,7 @@ export default function AddressPage() {
           topics: [transferTopic],
         });
 
-        // relevant if:
-        //  - this addr is token contract (log.address == id)
-        //  - OR this addr is from (topic1) OR to (topic2)
+        // relevant if this addr is contract OR from OR to
         const relevantLogs = logs
           .filter((l) => {
             const addrLower = l.address.toLowerCase();
@@ -164,20 +134,20 @@ export default function AddressPage() {
               t2 === paddedId
             );
           })
-          .reverse(); // newest last -> reverse for newest first
+          .reverse();
 
-        setTokenTxs(relevantLogs.slice(0, 200)); // cap list
+        setTokenTxs(relevantLogs.slice(0, 200));
 
-        // 4) HOLDINGS + TOKEN META (symbol/name/decimals)
+        // 4) HOLDINGS + TOKEN META
         setScanStatus("DISCOVERING_TOKEN_HOLDINGS...");
         const uniqueTokenContracts = [
           ...new Set(relevantLogs.map((l) => l.address.toLowerCase())),
         ];
 
-        const holdingsData: Holding[] = [];
-        const metaMap: Record<string, TokenMeta> = {};
+        const holdingsData = [];
+        const metaMap = {};
 
-        // Native GUSDT balance
+        // Native balance as GUSDT
         holdingsData.push({
           name: "FlowStable",
           symbol: "GUSDT",
@@ -213,7 +183,6 @@ export default function AddressPage() {
               decimals: decimals,
             };
 
-            // For holdings we only show non-zero balances
             if (bal > 0n) {
               holdingsData.push({
                 name: nm,
@@ -224,11 +193,11 @@ export default function AddressPage() {
               });
             }
           } catch {
-            // ignore non-standard tokens
+            // ignore bad tokens
           }
         }
 
-        // If the address itself is an ERC20 contract, also store its meta
+        // if address itself was ERC20 token
         if (contractMeta) {
           metaMap[address] = {
             symbol: contractMeta.symbol,
@@ -239,7 +208,6 @@ export default function AddressPage() {
 
         setHoldings(holdingsData);
         setTokenMeta(metaMap);
-
         setScanStatus("COMPLETE");
       } catch (e) {
         console.error("Address scan error:", e);
@@ -252,17 +220,15 @@ export default function AddressPage() {
     runScan();
   }, [id]);
 
-  // --- SAFE COPY FUNCTION ---
   const handleCopy = () => {
     try {
-      navigator.clipboard.writeText(id);
+      navigator.clipboard.writeText(String(id));
       alert("Address Copied to Clipboard");
     } catch {
       console.warn("Clipboard API failed");
     }
   };
 
-  // --- LOADING STATE ---
   if (loading) {
     return (
       <div className="min-h-screen bg-[#050505] flex flex-col">
@@ -285,6 +251,8 @@ export default function AddressPage() {
     );
   }
 
+  const balanceNumber = Number(summary.balance || "0");
+
   return (
     <div className="min-h-screen bg-[#050505] pb-20">
       <Navbar />
@@ -292,7 +260,7 @@ export default function AddressPage() {
         {/* TOP HEADER CARD */}
         <div className="terminal-card p-8 mb-8 bg-[#080808] border-t-4 border-t-neon">
           <div className="flex flex-col md:flex-row gap-8 items-start">
-            {/* ENTITY ICON */}
+            {/* ICON */}
             <div
               className={`w-20 h-20 flex items-center justify-center border-2 rounded-sm shadow-[0_0_40px_rgba(0,0,0,0.5)] ${
                 summary.meta
@@ -311,7 +279,7 @@ export default function AddressPage() {
               )}
             </div>
 
-            {/* INFO BLOCK */}
+            {/* INFO */}
             <div className="flex-1 w-full">
               <div className="flex flex-col md:flex-row md:items-center gap-4 mb-2">
                 <h1 className="text-3xl font-bold text-white font-mono">
@@ -326,7 +294,6 @@ export default function AddressPage() {
                 </span>
               </div>
 
-              {/* ADDRESS BAR */}
               <div
                 className="flex items-center gap-3 group cursor-pointer w-full md:w-fit"
                 onClick={handleCopy}
@@ -343,9 +310,9 @@ export default function AddressPage() {
           </div>
         </div>
 
-        {/* DASHBOARD GRID */}
+        {/* STATS GRID */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          {/* CARD 1: BALANCE & HOLDINGS */}
+          {/* BALANCE & HOLDINGS */}
           <div className="terminal-card p-6 flex flex-col justify-between relative min-h-[140px]">
             <div className="flex justify-between items-start">
               <p className="text-gray-500 text-[10px] font-mono font-bold uppercase tracking-widest">
@@ -357,11 +324,11 @@ export default function AddressPage() {
             </div>
             <div>
               <p className="text-2xl font-bold font-mono text-white truncate">
-                {parseFloat(summary.balance).toFixed(4)} GUSDT
+                {balanceNumber.toFixed(4)} GUSDT
               </p>
               <div className="relative mt-2">
                 <button
-                  onClick={() => setShowHoldings((s) => !s)}
+                  onClick={() => setShowHoldings(!showHoldings)}
                   className="flex items-center gap-2 text-xs text-gray-400 hover:text-neon border border-[#333] px-3 py-1.5 rounded bg-[#111] w-full justify-between"
                 >
                   <span>Holdings: {holdings.length} Tokens</span>
@@ -375,38 +342,41 @@ export default function AddressPage() {
 
                 {showHoldings && (
                   <div className="absolute top-full left-0 w-full mt-1 bg-[#0a0a0a] border border-[#333] shadow-xl z-20 max-h-60 overflow-auto custom-scrollbar rounded-sm">
-                    {holdings.map((h, i) => (
-                      <div
-                        key={i}
-                        className="p-3 hover:bg-[#111] border-b border-[#222] last:border-0 flex justify-between items-center"
-                      >
-                        <div className="flex flex-col">
-                          <span className="text-xs text-white font-bold">
-                            {h.symbol}
-                          </span>
-                          <span className="text-[10px] text-gray-500">
-                            {h.name}
-                          </span>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs text-neon font-mono">
-                            {parseFloat(h.balance).toFixed(4)}
-                          </span>
-                          {h.isNative && (
-                            <span className="block text-[8px] text-gray-600">
-                              GAS
+                    {holdings.map((h, i) => {
+                      const balNum = Number(h.balance || "0");
+                      return (
+                        <div
+                          key={i}
+                          className="p-3 hover:bg-[#111] border-b border-[#222] last:border-0 flex justify-between items-center"
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-xs text-white font-bold">
+                              {h.symbol}
                             </span>
-                          )}
+                            <span className="text-[10px] text-gray-500">
+                              {h.name}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-xs text-neon font-mono">
+                              {balNum.toFixed(4)}
+                            </span>
+                            {h.isNative && (
+                              <span className="block text-[8px] text-gray-600">
+                                GAS
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
             </div>
           </div>
 
-          {/* CARD 2: TOKEN META OR TX COUNT */}
+          {/* TOKEN META / NONCE */}
           {summary.meta ? (
             <div className="terminal-card p-6 flex flex-col justify-between">
               <div className="flex justify-between items-start">
@@ -447,7 +417,7 @@ export default function AddressPage() {
             </div>
           )}
 
-          {/* CARD 3: STATUS */}
+          {/* STATUS */}
           <div className="terminal-card p-6 flex flex-col justify-between border-l-4 border-l-neon bg-[#0c0c0c]">
             <div className="flex justify-between items-start">
               <p className="text-gray-500 text-[10px] font-mono font-bold uppercase tracking-widest">
@@ -462,7 +432,7 @@ export default function AddressPage() {
           </div>
         </div>
 
-        {/* TOKEN TRANSFERS TAB ONLY */}
+        {/* TOKEN TRANSFERS ONLY */}
         <div className="terminal-card min-h-[400px]">
           <div className="flex bg-[#111] border-b border-[#222] overflow-x-auto">
             <button
@@ -479,8 +449,8 @@ export default function AddressPage() {
 
           <div className="p-0">
             <div className="p-3 bg-[#0a0a0a] border-b border-[#222] flex items-center gap-2 text-[10px] text-gray-500 font-mono">
-              Showing ERC20 Transfer logs where this address is token, sender
-              or receiver.
+              Showing ERC20 <span className="font-bold">Transfer</span> logs
+              where this address is token, sender or receiver.
             </div>
 
             <div className="overflow-x-auto custom-scrollbar">
@@ -527,30 +497,45 @@ export default function AddressPage() {
                   )}
 
                   {tokenTxs.map((log, i) => {
-                    const addrLower = id.toLowerCase();
+                    const addrLower = String(id).toLowerCase();
                     const fromTopic = log.topics[1];
                     const toTopic = log.topics[2];
 
                     const from =
                       fromTopic && fromTopic.length >= 66
-                        ? ("0x" +
-                            fromTopic.slice(
-                              fromTopic.length - 40
-                            )) as string
+                        ? "0x" + fromTopic.slice(fromTopic.length - 40)
                         : "";
                     const to =
                       toTopic && toTopic.length >= 66
-                        ? ("0x" + toTopic.slice(toTopic.length - 40)) as string
+                        ? "0x" + toTopic.slice(toTopic.length - 40)
                         : "";
 
                     const isIncoming = to.toLowerCase() === addrLower;
+
                     const meta =
                       tokenMeta[log.address.toLowerCase()] ||
-                      ({ symbol: "UNK", name: "", decimals: 18 } as TokenMeta);
+                      { symbol: "UNK", name: "", decimals: 18 };
 
                     const amountFormatted = formatWithDecimals(
                       log.data,
                       meta.decimals
                     );
                     const rawValue = hexToDecString(log.data);
-                    const bloc
+                    const blockNum = hexToDecString(
+                      log.blockNumber || "0x0"
+                    );
+
+                    return (
+                      <tr
+                        key={i}
+                        className="hover:bg-[#111] transition group"
+                      >
+                        <td className="p-4">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[9px] border font-bold ${
+                              isIncoming
+                                ? "border-green-800 text-green-500 bg-green-900/20"
+                                : "border-yellow-800 text-yellow-500 bg-yellow-900/20"
+                            }`}
+                          >
+                            {isIncoming ? "IN
